@@ -1,0 +1,29 @@
+#!/bin/bash
+# Config for networkRateLimiter
+
+# Rate limit for incoming traffic from IPs described below in 'remotesToRateLimit'
+ ingress_rate=20mbit
+ ingress_ceil=20mbit
+ingress_burst=20mbit
+
+# Rate limit for outgoing traffic to IPs described below in 'remotesToRateLimit' and also outgoingPortsToRateLimitTCP + outgoingPortsToRateLimitUDP
+ egress_rate=20mbit
+ egress_ceil=20mbit
+egress_burst=20mbit
+
+
+# Remote addresses which should be rate limited to and from 
+remotesToRateLimit=(1.1.1.1/32 2.2.2.2/32)
+
+# Outgoing ports from this machine which should be rate limited. For TCP and UDP.
+# More protocols could be supported but this is enough for me for now.
+outgoingPortsToRateLimitTCP=()
+outgoingPortsToRateLimitUDP=(53 443 1194)
+
+# Either partial network or full gateway addresses expected from `ip route show default` to match
+# Dots will be automatically escaped\.
+
+# In the below example this script will activate when any 192.168 network is present in default route output.
+# But only on the 10.53.53. network when the gateway's IP is in the output.
+# That could also just be '10.53.53.' but there may be subnets smaller than /24 this example user is okay with going fast on.
+activationNetworks=(192.168. 10.53.53.1)

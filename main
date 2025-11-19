@@ -1,0 +1,96 @@
+#!/bin/bash
+# For shaping traffic to specific remote ports, and to+from specific remote hosts on this host.
+
+[ $UID -ne 0 ] && SUDO=sudo # Use sudo if not root
+_scriptRoot="$(dirname $(realpath $0))"
+#_scriptName="$(basename ${_scriptRoot})"
+cd ${_scriptRoot}
+
+if ! source config.sh
+then
+  echo "Copy config.sh.sample to get started."
+  exit 1
+fi
+
+# Act on all physical interfaces.
+interfaces=($(for i in /sys/class/net/* ; do if [ -e "$i/device" ] ; then basename "$i" ; fi ; done))
+if [ ${#interfaces[@]} -eq 0 ]
+then
+  echo "Found no interfaces."
+  exit 1
+fi
+
+function do_cleanup {
+
+    echo "Removing qdisc's and IFB interfaces..." >&2
+    ${SUDO} modprobe -r ifb # Clean up all ifbs
+    ${SUDO} modprobe    ifb
+
+    for interface in ${interfaces[@]}
+    do
+      # Clean up any previous attempts
+      ${SUDO} tc qdisc del dev ${interface} root >/dev/null 2>&1
+      ${SUDO} tc qdisc del dev ${interface} handle ffff: ingress >/dev/null 2>&1
+    done
+}
+
+
+# Check if we should activate or not
+for network in ${activationNetworks[@]}
+do
+  if ip route show default | grep -qs "${network//./\\.}"
+  then
+    echo "We're on a network we should rate limit ourselves on. (${network})" >&2
+    run=1
+  fi
+done
+
+
+
+do_cleanup
+[ -z "${run}" ] && exit 0
+
+echo "Starting..." >&2
+
+
+# Loop over each interface
+for interface in ${interfaces[@]}
+do
+
+  interface_ifb="ifb_${interface}"
+  interface_ifb_truncated="${interface_ifb:0:15}" # ip link wont accept a name longer than 15 chars
+
+  # Create a new IFB for this interface
+  ${SUDO} ip link add ${interface_ifb_truncated} type ifb
+  ${SUDO} ip link set ${interface_ifb_truncated} up
+
+  # A qdisc and class for the IFB (Incoming packets get redirect dev'd to this IFB)
+  ${SUDO} tc qdisc add dev ${interface_ifb_truncated} root handle 1: htb default 1
+  ${SUDO} tc class add dev ${interface_ifb_truncated} parent      1:  classid 1:1  htb rate ${ingress_rate} ceil ${ingress_ceil} burst ${ingress_burst}
+
+  # qdisc for the real interface (Outgoing packets)
+  ${SUDO} tc qdisc add dev ${interface} root handle 1: htb default 1
+  ${SUDO} tc class add dev ${interface} parent 1:  classid 1:1  htb rate ${egress_rate} ceil ${egress_ceil} burst ${egress_burst}
+  ${SUDO} tc class add dev ${interface} parent 1:1 classid 1:21 htb rate 20mbit    ceil 20mbit    burst 1mbit
+  ${SUDO} tc qdisc add dev ${interface} handle ffff: ingress
+
+  # Ratelimit our outbound traffic to this host, and forward its inbound traffic to us, into the ifb interface.
+
+  for remote in ${remotesToRateLimit[@]}
+  do
+    ${SUDO} tc filter add dev ${interface}              protocol all u32 match ip dst ${remote} flowid 1:21
+    ${SUDO} tc filter add dev ${interface} parent ffff: protocol all u32 match ip src ${remote} action mirred egress redirect dev ${interface_ifb_truncated}
+  done
+
+  for udpPort in ${outgoingPortsToRateLimitUDP[@]}
+  do
+    ${SUDO} tc filter add dev ${interface}              protocol all u32 match ip protocol 17 0xff match ip dport ${udpPort} 0xffff flowid 1:21
+  done
+
+  for tcpPort in ${outgoingPortsToRateLimitTCP[@]}
+  do
+    ${SUDO} tc filter add dev ${interface}              protocol all u32 match ip protocol 06 0xff match ip dport ${tcpPort} 0xffff flowid 1:21
+  done
+done
+
+echo "Active." >&2
